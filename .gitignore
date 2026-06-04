@@ -30,6 +30,7 @@ ipch/
 clguetzli/clguetzli.cu.ptx*
 clguetzli/clguetzli_amd.cl.lzo
 clguetzli/clguetzli.cl.lzo
+clguetzli/clguetzli_cl_src.h
 *.ptx64
 *.zip
 minilzoc/minilzoc

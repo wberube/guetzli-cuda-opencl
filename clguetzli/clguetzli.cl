@@ -218,7 +218,7 @@ typedef struct __IntFloatPairList
 __device__ void XybToVals(
 	__private const float x, __private const float y, __private const float z,
 	__private float *valx, __private float *valy, __private float *valz);
-__device__ float InterpolateClampNegative(__global const float *array, int size, float sx);
+__device__ float InterpolateClampNegative(__constant const float *array, int size, float sx);
 __device__ void XybDiffLowFreqSquaredAccumulate(float r0, float g0, float b0,
 												float r1, float g1, float b1,
 												float factor, float res[3]);
@@ -268,7 +268,10 @@ __device__ float CompareBlockFactor(const channel_info mayout_channel[3],
 									 __global const float *mask_scale,
 									 const int image_width,
 									 const int image_height,
-									 const int factor);
+									 const int factor,
+									 const int changed_c,
+									 __private uchar yuv8x8[3 * 8 * 8],
+									 __private uchar yuv16x16[3 * 16 * 16]);
 
 __device__ void floatcopy(__private float *dst, __private const float *src, const int size);
 __device__ void coeffcopy(__private coeff_t *dst, const coeff_t *src, int size);
@@ -277,7 +280,7 @@ __device__ int list_erase(__private IntFloatPairList *list, const int idx);
 __device__ int list_push_back(__private IntFloatPairList *list, int i, float f);
 __device__ void CoeffToIDCT(__private const coeff_t block[8 * 8], uchar out[8 * 8]);
 __device__ coeff_t Quantize(coeff_t raw_coeff, int quant);
-__device__ bool QuantizeBlock(coeff_t block[kDCTBlockSize], __global const int q[kDCTBlockSize]);
+__device__ bool QuantizeBlock(coeff_t block[kDCTBlockSize], __constant const int q[kDCTBlockSize]);
 __device__ void ColorTransformYCbCrToRGB(__global uchar pixel[3]);
 
 __device__ float _abs_f(float val)
@@ -323,7 +326,7 @@ __device__ int _max_i(int a, int b)
 __kernel void clConvolutionEx(
 	__global float *__restrict__ result,
 	__global const float *__restrict__ inp, const int xsize,
-	__global const float *multipliers, const int len,
+	__constant const float *multipliers, const int len,
 	const int xstep, const int offset, const float border_ratio)
 {
 	const int ox = get_global_id(0);
@@ -369,7 +372,7 @@ __kernel void clConvolutionXEx(
 	__global float *__restrict__ result,
 	const int xsize, const int ysize,
 	__global const float *__restrict__ inp,
-	__global const float *multipliers, const int len,
+	__constant const float *multipliers, const int len,
 	const int step, const int offset, const float border_ratio)
 {
 	const int x = get_global_id(0) * step;
@@ -412,7 +415,7 @@ __kernel void clConvolutionYEx(
 	__global float *__restrict__ result,
 	const int xsize, const int ysize,
 	__global const float *__restrict__ inp,
-	__global const float *multipliers, const int len,
+	__constant const float *multipliers, const int len,
 	const int step, const int offset, const float border_ratio)
 {
 	const int x = get_global_id(0) * step;
@@ -905,8 +908,8 @@ __kernel void clDoMaskEx(
 	__global float *mask_x, __global float *mask_y, __global float *mask_b,
 	const int xsize, const int ysize,
 	__global float *mask_dc_x, __global float *mask_dc_y, __global float *mask_dc_b,
-	__global const float *lut_x, __global const float *lut_y, __global const float *lut_b,
-	__global const float *lut_dc_x, __global const float *lut_dc_y, __global const float *lut_dc_b)
+	__constant const float *lut_x, __constant const float *lut_y, __constant const float *lut_b,
+	__constant const float *lut_dc_x, __constant const float *lut_dc_y, __constant const float *lut_dc_b)
 {
 	const int x = get_global_id(0);
 	const int y = get_global_id(1);
@@ -1103,6 +1106,10 @@ __kernel void clComputeBlockZeroingOrderEx(
 
 	int count = MakeInputOrderEx(mayout_block, orig_block, &input_order);
 
+	uchar yuv8x8[3 * 8 * 8] = {0};
+	uchar yuv16x16[3 * 16 * 16] = {0};
+	CompareBlockFactor(mayout_channel, mayout_block, block_x, block_y, orig_image_batch, mask_scale, image_width, image_height, factor, -1, yuv8x8, yuv16x16);
+
 	while (input_order.size > 0)
 	{
 		float best_err = 1e17f;
@@ -1113,6 +1120,15 @@ __kernel void clComputeBlockZeroingOrderEx(
 			coeff_t old_coeff = mayout_block[idx];
 			mayout_block[idx] = 0;
 
+			int changed_c = idx / kBlockSize;
+
+			uchar backup_yuv8[64];
+			for(int j=0; j<64; j++) backup_yuv8[j] = yuv8x8[j*3 + changed_c];
+			uchar backup_yuv16[256];
+			if (factor == 2) {
+				for(int j=0; j<256; j++) backup_yuv16[j] = yuv16x16[j*3 + changed_c];
+			}
+
 			float max_err = CompareBlockFactor(mayout_channel,
 											   mayout_block,
 											   block_x,
@@ -1121,13 +1137,21 @@ __kernel void clComputeBlockZeroingOrderEx(
 											   mask_scale,
 											   image_width,
 											   image_height,
-											   factor);
+											   factor,
+											   changed_c,
+											   yuv8x8,
+											   yuv16x16);
 			if (max_err < best_err)
 			{
 				best_err = max_err;
 				best_i = i;
 			}
 			mayout_block[idx] = old_coeff;
+
+			for(int j=0; j<64; j++) yuv8x8[j*3 + changed_c] = backup_yuv8[j];
+			if (factor == 2) {
+				for(int j=0; j<256; j++) yuv16x16[j*3 + changed_c] = backup_yuv16[j];
+			}
 		}
 
 		if (best_err >= BlockErrorLimit)
@@ -1136,6 +1160,9 @@ __kernel void clComputeBlockZeroingOrderEx(
 		}
 		int idx = input_order.pData[best_i].idx;
 		mayout_block[idx] = 0;
+		int changed_c = idx / kBlockSize;
+		CompareBlockFactor(mayout_channel, mayout_block, block_x, block_y, orig_image_batch, mask_scale, image_width, image_height, factor, changed_c, yuv8x8, yuv16x16);
+
 		list_erase(&input_order, best_i);
 
 		list_push_back(&output_order, idx, best_err);
@@ -1169,7 +1196,7 @@ __kernel void clCopyFromJpegComponentEx(
 
 	__global const coeff_t *jpeg_batch, // Coeffs of Original image.
 
-	__global const int *quant,
+	__constant const int *quant,
 
 	const int jpeg_block_width,
 	const int jpeg_block_height,
@@ -1209,7 +1236,7 @@ __kernel void clApplyGlobalQuantizationEx(
 	__global coeff_t *output_batch,
 	__global uchar *output_idct,
 	__global uchar *output_bool,
-	__global const int *q,
+	__constant const int *q,
 	const int block_width,
 	const int block_height)
 {
@@ -1533,7 +1560,7 @@ __device__ void XybLowFreqToVals(__private const float x, __private const float 
 	*valy = Interpolate(&XybLowFreqToVals_lut[0], 21, y * ymul);
 }
 
-__device__ float InterpolateClampNegative(__global const float *array,
+__device__ float InterpolateClampNegative(__constant const float *array,
 										   int size, float sx)
 {
 	if (sx < 0)
@@ -3951,7 +3978,10 @@ __device__ float CompareBlockFactor(const channel_info mayout_channel[3],
 									 __global const float *mask_scale,
 									 const int image_width,
 									 const int image_height,
-									 const int factor)
+									 const int factor,
+									 const int changed_c,
+									 __private uchar yuv8x8[3 * 8 * 8],
+									 __private uchar yuv16x16[3 * 16 * 16])
 {
 	__private const coeff_t *candidate_channel[3];
 	for (int c = 0; c < 3; c++)
@@ -3959,11 +3989,10 @@ __device__ float CompareBlockFactor(const channel_info mayout_channel[3],
 		candidate_channel[c] = &candidate_block[c * 8 * 8];
 	}
 
-	uchar yuv16x16[3 * 16 * 16] = {0}; // factor 2 mode output image
-	uchar yuv8x8[3 * 8 * 8] = {0};	   // factor 1 mode output image
-
 	for (int c = 0; c < 3; c++)
 	{
+		if (changed_c != -1 && changed_c != c) continue;
+
 		if (mayout_channel[c].factor == 1)
 		{
 			if (factor == 1)
@@ -4037,7 +4066,10 @@ __device__ float CompareBlockFactor(const channel_info mayout_channel[3],
 		int inside_y = block_y * 8 + 8 > image_height ? image_height - block_y * 8 : 8;
 		float rgb1_c[3][kDCTBlockSize];
 
-		YUVToImage(yuv8x8, rgb1_c[0], rgb1_c[1], rgb1_c[2], 8, 8, inside_x, inside_y);
+		uchar yuv8x8_copy[3 * 8 * 8];
+		for(int i=0; i<3*8*8; i++) yuv8x8_copy[i] = yuv8x8[i];
+
+		YUVToImage(yuv8x8_copy, rgb1_c[0], rgb1_c[1], rgb1_c[2], 8, 8, inside_x, inside_y);
 
 		return ComputeImage8x8Block(rgb0_c, rgb1_c, mask_scale + block_8x8idx * 3);
 	}
@@ -4047,7 +4079,10 @@ __device__ float CompareBlockFactor(const channel_info mayout_channel[3],
 		int inside_y = block_y * 16 + 16 > image_height ? image_height - block_y * 16 : 16;
 
 		float rgb16x16[3][16 * 16];
-		YUVToImage(yuv16x16, rgb16x16[0], rgb16x16[1], rgb16x16[2], 16, 16, inside_x, inside_y);
+		uchar yuv16x16_copy[3 * 16 * 16];
+		for(int i=0; i<3*16*16; i++) yuv16x16_copy[i] = yuv16x16[i];
+
+		YUVToImage(yuv16x16_copy, rgb16x16[0], rgb16x16[1], rgb16x16[2], 16, 16, inside_x, inside_y);
 
 		float max_err = 0;
 		for (int iy = 0; iy < factor; ++iy)
@@ -4085,7 +4120,7 @@ __device__ coeff_t Quantize(coeff_t raw_coeff, int quant)
 	return raw_coeff + delta;
 }
 
-__device__ bool QuantizeBlock(coeff_t block[kDCTBlockSize], __global const int q[kDCTBlockSize])
+__device__ bool QuantizeBlock(coeff_t block[kDCTBlockSize], __constant const int q[kDCTBlockSize])
 {
 	bool changed = false;
 	for (int k = 0; k < kDCTBlockSize; ++k)
