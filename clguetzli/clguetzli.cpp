@@ -614,26 +614,21 @@ void clMaskHighIntensityChangeEx(
 	Perf clk("clMaskHighIntensityChangeEx");
 	ocl_args_d_t &ocl = getOcl();
 
-	TrackMemory c0_m(channel_size * 3, "clMaskHighIntensityChangeEx:c0");
-	ocl_channels c0 = ocl.allocMemChannels(channel_size);
-	TrackMemory c1_m(channel_size * 3, "clMaskHighIntensityChangeEx:c1");
-	ocl_channels c1 = ocl.allocMemChannels(channel_size);
+	TrackMemory c0_g_m(channel_size, "clMaskHighIntensityChangeEx:c0_g");
+	cl_mem c0_g = ocl.allocMem(channel_size);
+	TrackMemory c1_g_m(channel_size, "clMaskHighIntensityChangeEx:c1_g");
+	cl_mem c1_g = ocl.allocMem(channel_size);
 
-	clEnqueueCopyBuffer(ocl.commandQueue, xyb0.r, c0.r, 0, 0, channel_size, 0, NULL, NULL);
-	clEnqueueCopyBuffer(ocl.commandQueue, xyb0.g, c0.g, 0, 0, channel_size, 0, NULL, NULL);
-	clEnqueueCopyBuffer(ocl.commandQueue, xyb0.b, c0.b, 0, 0, channel_size, 0, NULL, NULL);
-	clEnqueueCopyBuffer(ocl.commandQueue, xyb1.r, c1.r, 0, 0, channel_size, 0, NULL, NULL);
-	clEnqueueCopyBuffer(ocl.commandQueue, xyb1.g, c1.g, 0, 0, channel_size, 0, NULL, NULL);
-	clEnqueueCopyBuffer(ocl.commandQueue, xyb1.b, c1.b, 0, 0, channel_size, 0, NULL, NULL);
-	clFinish(ocl.commandQueue);
+	clEnqueueCopyBuffer(ocl.commandQueue, xyb0.g, c0_g, 0, 0, channel_size, 0, NULL, NULL);
+	clEnqueueCopyBuffer(ocl.commandQueue, xyb1.g, c1_g, 0, 0, channel_size, 0, NULL, NULL);
 
 	cl_kernel kernel = ocl.kernel[KERNEL_MASKHIGHINTENSITYCHANGE];
 	clSetKernelArgEx(kernel,
 					 &xyb0.r, &xyb0.g, &xyb0.b,
 					 &xsize, &ysize,
 					 &xyb1.r, &xyb1.g, &xyb1.b,
-					 &c0.r, &c0.g, &c0.b,
-					 &c1.r, &c1.g, &c1.b);
+					 &c0_g,
+					 &c1_g);
 
 	size_t globalWorkSize[2] = {static_cast<size_t>(xsize), static_cast<size_t>(ysize)};
 	cl_int err = EnqueueKernel(ocl, kernel, 2, globalWorkSize);
@@ -641,8 +636,8 @@ void clMaskHighIntensityChangeEx(
 	err = clFinish(ocl.commandQueue);
 	LOG_CL_RESULT(err);
 
-	ocl.releaseMemChannels(c0);
-	ocl.releaseMemChannels(c1);
+	ocl.releaseMem(c0_g);
+	ocl.releaseMem(c1_g);
 }
 
 void clEdgeDetectorMapEx(

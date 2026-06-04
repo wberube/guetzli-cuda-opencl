@@ -35,12 +35,18 @@ typedef CUdeviceptr cu_mem;
     #define __constant
     #define __constant_ex
     #define __device__
+    #define __local
 
     typedef unsigned char uchar;
     typedef unsigned short ushort;
 
+    #define CLK_LOCAL_MEM_FENCE 1
+    inline void barrier(int flags) { (void)flags; }
+
     int get_global_id(int dim);
     int get_global_size(int dim);
+    inline int get_local_id(int dim) { return 0; }
+    inline int get_local_size(int dim) { return 1; }
     void set_global_id(int dim, int id);
     void set_global_size(int dim, int size);
 
@@ -184,6 +190,7 @@ typedef CUdeviceptr cu_mem;
     #undef __constant
     #undef __constant_ex
     #undef __device__
+    #undef __local
 #endif
 
 #endif /*__CLGUETZLI_CL_H__*/

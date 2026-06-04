@@ -51,6 +51,8 @@ void set_global_size(int dim, int size){
 #define __constant
 #define __constant_ex
 #define __device__
+#define __local
+
 #endif
 
 #include "clguetzli.cl"

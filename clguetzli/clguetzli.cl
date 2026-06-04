@@ -515,8 +515,8 @@ __kernel void clMaskHighIntensityChangeEx(
 	__global float *xyb0_x, __global float *xyb0_y, __global float *xyb0_b,
 	const int xsize, const int ysize,
 	__global float *xyb1_x, __global float *xyb1_y, __global float *xyb1_b,
-	__global const float *c0_x, __global const float *c0_y, __global const float *c0_b,
-	__global const float *c1_x, __global const float *c1_y, __global const float *c1_b)
+	__global const float *c0_y,
+	__global const float *c1_y)
 {
 	const int x = get_global_id(0);
 	const int y = get_global_id(1);
@@ -524,10 +524,17 @@ __kernel void clMaskHighIntensityChangeEx(
 		return;
 
 	const int ix = y * xsize + x;
+	
+	// Read our own x and b channels into registers immediately, before any thread can overwrite them
+	const float my_xyb0_x = xyb0_x[ix];
+	const float my_xyb0_b = xyb0_b[ix];
+	const float my_xyb1_x = xyb1_x[ix];
+	const float my_xyb1_b = xyb1_b[ix];
+
 	const float ave[3] = {
-		(c0_x[ix] + c1_x[ix]) * 0.5f,
+		(my_xyb0_x + my_xyb1_x) * 0.5f,
 		(c0_y[ix] + c1_y[ix]) * 0.5f,
-		(c0_b[ix] + c1_b[ix]) * 0.5f,
+		(my_xyb0_b + my_xyb1_b) * 0.5f,
 	};
 	float sqr_max_diff = -1;
 	{
@@ -561,14 +568,14 @@ __kernel void clMaskHighIntensityChangeEx(
 	};
 	// Interpolate lineraly between the average color and the actual
 	// color -- to reduce the importance of this pixel.
-	xyb0_x[ix] = (float)(mix[0] * c0_x[ix] + (1 - mix[0]) * ave[0]);
-	xyb1_x[ix] = (float)(mix[0] * c1_x[ix] + (1 - mix[0]) * ave[0]);
+	xyb0_x[ix] = (float)(mix[0] * my_xyb0_x + (1 - mix[0]) * ave[0]);
+	xyb1_x[ix] = (float)(mix[0] * my_xyb1_x + (1 - mix[0]) * ave[0]);
 
 	xyb0_y[ix] = (float)(mix[1] * c0_y[ix] + (1 - mix[1]) * ave[1]);
 	xyb1_y[ix] = (float)(mix[1] * c1_y[ix] + (1 - mix[1]) * ave[1]);
 
-	xyb0_b[ix] = (float)(mix[2] * c0_b[ix] + (1 - mix[2]) * ave[2]);
-	xyb1_b[ix] = (float)(mix[2] * c1_b[ix] + (1 - mix[2]) * ave[2]);
+	xyb0_b[ix] = (float)(mix[2] * my_xyb0_b + (1 - mix[2]) * ave[2]);
+	xyb1_b[ix] = (float)(mix[2] * my_xyb1_b + (1 - mix[2]) * ave[2]);
 }
 
 __kernel void clEdgeDetectorMapEx(
@@ -829,50 +836,71 @@ __kernel void clScaleImageEx(__global float *img, const int size, float scale)
 __constant float Average5x5_scale = 1.0f / (5.0f + 4 * Average5x5_w);
 __kernel void clAverage5x5Ex(__global float *img, const int xsize, const int ysize, __global const float *img_org)
 {
+	const int lx = get_local_id(0);
+	const int ly = get_local_id(1);
 	const int x = get_global_id(0);
 	const int y = get_global_id(1);
+
+	// Tile dimension sizes: workgroup sizes plus padding for the 5x5 kernel (radius = 1 because it only accesses adjacent neighbors)
+	#define TILE_W (16 + 2)
+	#define TILE_H (16 + 2)
+	__local float tile[TILE_H][TILE_W];
+
+	// Load data into local memory
+	int read_x = x - 1;
+	int read_y = y - 1;
+
+	// Clamp reads to image boundaries
+	int clamp_x = _max_i(0, _min_i(xsize - 1, read_x));
+	int clamp_y = _max_i(0, _min_i(ysize - 1, read_y));
+	tile[ly][lx] = img_org[clamp_y * xsize + clamp_x];
+
+	// Handle boundaries of the tile
+	if (lx < 2 && (get_local_id(0) + get_local_size(0)) <= TILE_W) {
+		clamp_x = _max_i(0, _min_i(xsize - 1, read_x + get_local_size(0)));
+		tile[ly][lx + get_local_size(0)] = img_org[clamp_y * xsize + clamp_x];
+	}
+	if (ly < 2 && (get_local_id(1) + get_local_size(1)) <= TILE_H) {
+		clamp_y = _max_i(0, _min_i(ysize - 1, read_y + get_local_size(1)));
+		clamp_x = _max_i(0, _min_i(xsize - 1, read_x));
+		tile[ly + get_local_size(1)][lx] = img_org[clamp_y * xsize + clamp_x];
+	}
+	if (lx < 2 && ly < 2 && (get_local_id(0) + get_local_size(0)) <= TILE_W && (get_local_id(1) + get_local_size(1)) <= TILE_H) {
+		clamp_x = _max_i(0, _min_i(xsize - 1, read_x + get_local_size(0)));
+		clamp_y = _max_i(0, _min_i(ysize - 1, read_y + get_local_size(1)));
+		tile[ly + get_local_size(1)][lx + get_local_size(0)] = img_org[clamp_y * xsize + clamp_x];
+	}
+
+	barrier(CLK_LOCAL_MEM_FENCE);
+
 	if (x >= xsize || y >= ysize)
 		return;
 
-	const int row0 = y * xsize;
-	if (x - 1 >= 0)
-	{
-		img[row0 + x] += img_org[row0 + x - 1];
-	}
-	if (x + 1 < xsize)
-	{
-		img[row0 + x] += img_org[row0 + x + 1];
-	}
+	const int tx = lx + 1;
+	const int ty = ly + 1;
+
+	float sum = 0.0f;
+
+	// Center cross
+	if (x - 1 >= 0) sum += tile[ty][tx - 1];
+	if (x + 1 < xsize) sum += tile[ty][tx + 1];
 
 	if (y > 0)
 	{
-		const int rowd1 = row0 - xsize;
-		if (x - 1 >= 0)
-		{
-			img[row0 + x] += img_org[rowd1 + x - 1] * Average5x5_w;
-		}
-		img[row0 + x] += img_org[rowd1 + x];
-		if (x + 1 < xsize)
-		{
-			img[row0 + x] += img_org[rowd1 + x + 1] * Average5x5_w;
-		}
+		if (x - 1 >= 0) sum += tile[ty - 1][tx - 1] * Average5x5_w;
+		sum += tile[ty - 1][tx];
+		if (x + 1 < xsize) sum += tile[ty - 1][tx + 1] * Average5x5_w;
 	}
 
 	if (y + 1 < ysize)
 	{
-		const int rowu1 = row0 + xsize;
-		if (x - 1 >= 0)
-		{
-			img[row0 + x] += img_org[rowu1 + x - 1] * Average5x5_w;
-		}
-		img[row0 + x] += img_org[rowu1 + x];
-		if (x + 1 < xsize)
-		{
-			img[row0 + x] += img_org[rowu1 + x + 1] * Average5x5_w;
-		}
+		if (x - 1 >= 0) sum += tile[ty + 1][tx - 1] * Average5x5_w;
+		sum += tile[ty + 1][tx];
+		if (x + 1 < xsize) sum += tile[ty + 1][tx + 1] * Average5x5_w;
 	}
 
-	img[row0 + x] *= Average5x5_scale;
+	img[y * xsize + x] += sum;
+	img[y * xsize + x] *= Average5x5_scale;
 }
 
 __kernel void clMinSquareValEx(__global float *result, const int xsize, const int ysize, __global const float *img, const int square_size, const int offset)
