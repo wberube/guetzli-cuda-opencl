@@ -341,22 +341,25 @@ __kernel void clConvolutionEx(
 
 	const int x = ox * xstep;
 
+	// Precompute weight_no_border sum once (constant across all threads)
 	float weight_no_border = 0;
 	for (int j = 0; j <= 2 * offset; j++)
-	{
 		weight_no_border += multipliers[j];
-	}
 
 	int minx = x < offset ? 0 : x - offset;
 	int maxx = _min_i(xsize, x + len - offset);
 
-	float weight = 0.0f;
-	for (int j = minx; j < maxx; j++)
-	{
-		weight += multipliers[j - x + offset];
+	// Interior pixels skip the weight loop; weight == weight_no_border there
+	int interior = (x >= offset && x + len - offset <= xsize);
+	float weight;
+	if (interior) {
+		weight = weight_no_border;
+	} else {
+		weight = 0.0f;
+		for (int j = minx; j < maxx; j++)
+			weight += multipliers[j - x + offset];
+		weight = (1.0f - border_ratio) * weight + border_ratio * weight_no_border;
 	}
-
-	weight = (1.0f - border_ratio) * weight + border_ratio * weight_no_border;
 	float scale = 1.0f / weight;
 
 	float sum = 0.0f;
@@ -381,25 +384,25 @@ __kernel void clConvolutionXEx(
 	if (x >= xsize || y >= ysize)
 		return;
 
-	if (x % step != 0)
-		return;
-
+	// Precompute weight_no_border sum once (constant across all threads)
 	float weight_no_border = 0;
 	for (int j = 0; j <= 2 * offset; j++)
-	{
 		weight_no_border += multipliers[j];
-	}
 
 	int minx = x < offset ? 0 : x - offset;
 	int maxx = _min_i(xsize, x + len - offset);
 
-	float weight = 0.0f;
-	for (int j = minx; j < maxx; j++)
-	{
-		weight += multipliers[j - x + offset];
+	// Interior pixels skip the weight loop; weight == weight_no_border there
+	int interior = (x >= offset && x + len - offset <= xsize);
+	float weight;
+	if (interior) {
+		weight = weight_no_border;
+	} else {
+		weight = 0.0f;
+		for (int j = minx; j < maxx; j++)
+			weight += multipliers[j - x + offset];
+		weight = (1.0f - border_ratio) * weight + border_ratio * weight_no_border;
 	}
-
-	weight = (1.0f - border_ratio) * weight + border_ratio * weight_no_border;
 	float scale = 1.0f / weight;
 
 	float sum = 0.0f;
@@ -423,27 +426,26 @@ __kernel void clConvolutionYEx(
 
 	if (x >= xsize || y >= ysize)
 		return;
-	if (x % step != 0)
-		return;
-	if (y % step != 0)
-		return;
 
+	// Precompute weight_no_border sum once (constant across all threads)
 	float weight_no_border = 0;
 	for (int j = 0; j <= 2 * offset; j++)
-	{
 		weight_no_border += multipliers[j];
-	}
 
 	int miny = y < offset ? 0 : y - offset;
 	int maxy = _min_i(ysize, y + len - offset);
 
-	float weight = 0.0f;
-	for (int j = miny; j < maxy; j++)
-	{
-		weight += multipliers[j - y + offset];
+	// Interior pixels skip the weight loop; weight == weight_no_border there
+	int interior = (y >= offset && y + len - offset <= ysize);
+	float weight;
+	if (interior) {
+		weight = weight_no_border;
+	} else {
+		weight = 0.0f;
+		for (int j = miny; j < maxy; j++)
+			weight += multipliers[j - y + offset];
+		weight = (1.0f - border_ratio) * weight + border_ratio * weight_no_border;
 	}
-
-	weight = (1.0f - border_ratio) * weight + border_ratio * weight_no_border;
 	float scale = 1.0f / weight;
 
 	float sum = 0.0f;
@@ -524,7 +526,7 @@ __kernel void clMaskHighIntensityChangeEx(
 		return;
 
 	const int ix = y * xsize + x;
-	
+
 	// Read our own x and b channels into registers immediately, before any thread can overwrite them
 	const float my_xyb0_x = xyb0_x[ix];
 	const float my_xyb0_b = xyb0_b[ix];
@@ -580,16 +582,16 @@ __kernel void clMaskHighIntensityChangeEx(
 
 __kernel void clEdgeDetectorMapEx(
 	__global float *result,
-	const int res_xsize, 
+	const int res_xsize,
 	const int res_ysize,
-	__global const float *r, 
-	__global const float *g, 
+	__global const float *r,
+	__global const float *g,
 	__global const float *b,
-	__global const float *r2, 
-	__global const float *g2, 
+	__global const float *r2,
+	__global const float *g2,
 	__global const float *b2,
-	int xsize, 
-	int ysize, 
+	int xsize,
+	int ysize,
 	int step)
 {
 	const int res_x = get_global_id(0);
@@ -643,6 +645,7 @@ __kernel void clBlockDiffMapEx(
 		return;
 
 	unsigned int res_ix = res_y * res_xsize + res_x;
+	// Bounds check only limits pos_x to xsize, but block reads 8 elements → need clamp
 	unsigned int offset = _min_i(pos_y, ysize - 8) * xsize + _min_i(pos_x, xsize - 8);
 
 	__private float block0[3 * kBlockEdge * kBlockEdge];
@@ -656,16 +659,19 @@ __kernel void clBlockDiffMapEx(
 	__private float *block1_g = &block1[kBlockEdge * kBlockEdge];
 	__private float *block1_b = &block1[2 * kBlockEdge * kBlockEdge];
 
+	// Scalar loads are already coalesced (adjacent threads read adjacent blocks)
 	for (int y = 0; y < kBlockEdge; y++)
 	{
+		int base = kBlockEdge * y;
+		int row_ofs = offset + y * xsize;
 		for (int x = 0; x < kBlockEdge; x++)
 		{
-			block0_r[kBlockEdge * y + x] = r[offset + y * xsize + x];
-			block0_g[kBlockEdge * y + x] = g[offset + y * xsize + x];
-			block0_b[kBlockEdge * y + x] = b[offset + y * xsize + x];
-			block1_r[kBlockEdge * y + x] = r2[offset + y * xsize + x];
-			block1_g[kBlockEdge * y + x] = g2[offset + y * xsize + x];
-			block1_b[kBlockEdge * y + x] = b2[offset + y * xsize + x];
+			block0_r[base + x] = r[row_ofs + x];
+			block0_g[base + x] = g[row_ofs + x];
+			block0_b[base + x] = b[row_ofs + x];
+			block1_r[base + x] = r2[row_ofs + x];
+			block1_g[base + x] = g2[row_ofs + x];
+			block1_b[base + x] = b2[row_ofs + x];
 		}
 	}
 
@@ -841,7 +847,7 @@ __kernel void clAverage5x5Ex(__global float *img, const int xsize, const int ysi
 	const int x = get_global_id(0);
 	const int y = get_global_id(1);
 
-	// Tile dimension sizes: workgroup sizes plus padding for the 5x5 kernel (radius = 1 because it only accesses adjacent neighbors)
+	// Tile dimension sizes: workgroup sizes plus padding for the 5x5 kernel (radius = 1)
 	#define TILE_W (16 + 2)
 	#define TILE_H (16 + 2)
 	__local float tile[TILE_H][TILE_W];
@@ -850,12 +856,10 @@ __kernel void clAverage5x5Ex(__global float *img, const int xsize, const int ysi
 	int read_x = x - 1;
 	int read_y = y - 1;
 
-	// Clamp reads to image boundaries
 	int clamp_x = _max_i(0, _min_i(xsize - 1, read_x));
 	int clamp_y = _max_i(0, _min_i(ysize - 1, read_y));
 	tile[ly][lx] = img_org[clamp_y * xsize + clamp_x];
 
-	// Handle boundaries of the tile
 	if (lx < 2 && (get_local_id(0) + get_local_size(0)) <= TILE_W) {
 		clamp_x = _max_i(0, _min_i(xsize - 1, read_x + get_local_size(0)));
 		tile[ly][lx + get_local_size(0)] = img_org[clamp_y * xsize + clamp_x];
